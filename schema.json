@@ -1,0 +1,103 @@
+{
+  "enabled_sessions": {
+    "type": "list",
+    "name": "Enabled Sessions",
+    "default": [],
+    "hint": "One session ID per line, leave empty to enable for all sessions",
+    "locales": {
+      "zh": {
+        "name": "启用限流的会话",
+        "hint": "每行一个会话ID，留空则对所有会话生效"
+      }
+    }
+  },
+  "max_messages_per_minute": {
+    "type": "integer",
+    "name": "Max Messages Per Minute",
+    "default": 50,
+    "hint": "Trigger rate limiting when this count is exceeded",
+    "locales": {
+      "zh": {
+        "name": "每分钟最大消息数",
+        "hint": "超过此数量触发限流"
+      }
+    }
+  },
+  "max_wakeups_per_minute": {
+    "type": "integer",
+    "name": "Max Wakeups Per Minute",
+    "default": 20,
+    "hint": "Trigger rate limiting when LLM wakeup count is exceeded",
+    "locales": {
+      "zh": {
+        "name": "每分钟最大唤醒次数",
+        "hint": "超过此数量触发限流"
+      }
+    }
+  },
+  "cooldown_seconds": {
+    "type": "integer",
+    "name": "Cooldown Seconds",
+    "default": 300,
+    "hint": "Messages are discarded during the cooldown period after rate limiting",
+    "locales": {
+      "zh": {
+        "name": "冷却时间（秒）",
+        "hint": "限流后冷却期间丢弃消息"
+      }
+    }
+  },
+  "cooldown_reply": {
+    "type": "section",
+    "name": "Cooldown Reply",
+    "hint": "Send a reply when the bot is mentioned during cooldown",
+    "collapsed": true,
+    "locales": {
+      "zh": { "name": "冷却期回复", "hint": "冷却期间被提及时发送回复告知对方" }
+    },
+    "fields": {
+      "cooldown_reply_enabled": {
+        "type": "switch",
+        "name": "Enable",
+        "default": false,
+        "hint": "Whether to send a reply during cooldown when mentioned",
+        "locales": {
+          "zh": { "name": "启用", "hint": "冷却期间被提及时是否发送回复" }
+        }
+      },
+      "cooldown_reply_text": {
+        "type": "string",
+        "name": "Reply Text",
+        "default": "我现在比较忙，请稍后再找我~",
+        "hint": "The reply text sent during cooldown when mentioned",
+        "locales": {
+          "zh": { "name": "回复内容", "hint": "冷却期间被提时时发送的回复文字" }
+        }
+      }
+    }
+  },
+  "queue_mentions": {
+    "type": "switch",
+    "name": "Queue Mentioned Messages",
+    "default": false,
+    "hint": "Whether to queue messages that mention or reply to the AI during cooldown",
+    "locales": {
+      "zh": {
+        "name": "保留被提及的消息",
+        "hint": "冷却期内是否保留提及或引用 AI 的消息等待合并处理"
+      }
+    }
+  },
+  "owner_ids": {
+    "type": "list",
+    "name": "Owner IDs",
+    "default": [],
+    "hint": "One ID per line, messages from these users bypass rate limiting",
+    "locales": {
+      "zh": {
+        "name": "主人QQ号",
+        "hint": "每行一个QQ号，这些用户的消息不触发限流"
+      }
+    }
+  }
+}
