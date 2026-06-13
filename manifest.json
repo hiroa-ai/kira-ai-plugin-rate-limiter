@@ -1,7 +1,7 @@
 {
   "display_name": "Rate Limiter",
   "plugin_id": "kira-ai-plugin-rate-limiter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A plugin to limit the rate of messages in active group chats, preventing excessive token consumption.",
   "author": "hiroa-ai",
   "repo": "https://github.com/hiroa-ai/kira-ai-plugin-rate-limiter",

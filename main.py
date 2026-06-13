@@ -6,7 +6,7 @@ rate-limiter: 消息流速限流插件
 import time
 from collections import defaultdict, deque
 
-from core.plugin import BasePlugin, PluginContext, on, Priority, register
+from core.plugin import BasePlugin, PluginContext, on, Priority, logger
 from core.provider import LLMRequest
 from core.prompt_manager import Prompt
 from core.chat.message_utils import KiraMessageEvent, KiraMessageBatchEvent, MessageChain
@@ -32,13 +32,21 @@ class RateLimiterPlugin(BasePlugin):
         self.max_wakeups = self.plugin_cfg.get("max_wakeups_per_minute", 8)
         self.cooldown_seconds = self.plugin_cfg.get("cooldown_seconds", 300)
         self.queue_mentions = self.plugin_cfg.get("queue_mentions", True)
-        self.cooldown_reply_enabled = self.plugin_cfg.get("cooldown_reply_enabled", False)
-        self.cooldown_reply_text = self.plugin_cfg.get("cooldown_reply_text", "我现在比较忙，请稍后再找我~")
+        # cooldown_reply fields are nested under the "cooldown_reply" section
+        cooldown_reply_cfg = self.plugin_cfg.get("cooldown_reply", {})
+        self.cooldown_reply_enabled = cooldown_reply_cfg.get("cooldown_reply_enabled", False)
+        self.cooldown_reply_text = cooldown_reply_cfg.get("cooldown_reply_text", "我现在比较忙，请稍后再找我~")
         enabled = self.plugin_cfg.get("enabled_sessions", [])
         self.enabled_sessions = set(enabled) if enabled else None  # None 表示全部生效
         # owner_ids 在 schema.json 中是 list 类型
         owner_ids = self.plugin_cfg.get("owner_ids", [])
         self.owner_ids = set(str(uid) for uid in owner_ids) if owner_ids else set()
+        logger.info(
+            f"[RateLimiter] Initialized | max_msg={self.max_messages}/min, "
+            f"max_wakeup={self.max_wakeups}/min, cooldown={self.cooldown_seconds}s, "
+            f"sessions={'all' if self.enabled_sessions is None else len(self.enabled_sessions)}, "
+            f"owners={len(self.owner_ids)}"
+        )
 
     async def terminate(self):
         """插件卸载时清理"""
@@ -50,6 +58,12 @@ class RateLimiterPlugin(BasePlugin):
     # ----------------------------------------------------------------
     @on.im_message(priority=Priority.HIGH + 5)
     async def rate_limit_message(self, event: KiraMessageEvent, *args, **kwargs):
+        try:
+            await self._rate_limit_message_impl(event)
+        except Exception as e:
+            logger.error(f"[RateLimiter] Unhandled exception in rate_limit_message: {e}", exc_info=True)
+
+    async def _rate_limit_message_impl(self, event: KiraMessageEvent):
         session_id = event.session.sid
 
         # 仅对指定会话生效
@@ -62,6 +76,7 @@ class RateLimiterPlugin(BasePlugin):
 
         # 主人绕过限流
         if sender_id and sender_id in self.owner_ids:
+            logger.debug(f"[RateLimiter] Owner bypass: {sender_id} in {session_id}")
             return  # 继续正常流程
 
         stats = self.session_stats[session_id]
@@ -69,16 +84,23 @@ class RateLimiterPlugin(BasePlugin):
         # 清理过期记录（滑动窗口 60 秒）
         self._clean_window(stats, now)
 
-        # 检查冷却期
+        # Check cooldown
+        logger.debug(f"[RateLimiter] Cooldown check: until={stats['cooldown_until']}, now={now}, dropped={stats['dropped_count']}")
         if stats["cooldown_until"] and now < stats["cooldown_until"]:
             stats["dropped_count"] += 1
-            if self.queue_mentions and event.is_mentioned:
+            is_mentioned = bool(getattr(event, "is_mentioned", False))
+            logger.debug(f"[RateLimiter] In cooldown block: is_mentioned={is_mentioned}, queue_mentions={self.queue_mentions}")
+            if self.queue_mentions and is_mentioned:
                 stats["queued_mentions"].append(event)
-            else:
-                event.discard()
-            if self.cooldown_reply_enabled and event.is_mentioned:
-                chain = MessageChain([Text(self.cooldown_reply_text)])
-                await self.ctx.message_processor.send_message_chain(session_id, chain)
+                logger.info(f"[RateLimiter] Mention queued during cooldown: {session_id}")
+            event.discard(force=True)
+            if self.cooldown_reply_enabled and is_mentioned:
+                try:
+                    chain = MessageChain([Text(self.cooldown_reply_text)])
+                    await self.ctx.message_processor.send_message_chain(session_id, chain)
+                    logger.debug(f"[RateLimiter] Cooldown reply sent to {session_id}")
+                except Exception as e:
+                    logger.error(f"[RateLimiter] Failed to send cooldown reply to {session_id}: {e}")
             return
 
         # 记录消息时间戳
@@ -88,8 +110,10 @@ class RateLimiterPlugin(BasePlugin):
         if len(stats["timestamps"]) > self.max_messages:
             stats["cooldown_until"] = now + self.cooldown_seconds
             stats["dropped_count"] = 0
-            stats["timestamps"].clear()  # 清空窗口，避免恢复后立即再次触发
-            event.discard()
+            stats["timestamps"].clear()
+            await self._clear_session_buffer(session_id)
+            event.discard(force=True)
+            logger.warning(f"[RateLimiter] Message rate exceeded in {session_id}, entering cooldown for {self.cooldown_seconds}s")
 
     # ----------------------------------------------------------------
     # Hook: LLM 请求前注入限流上下文
@@ -146,9 +170,22 @@ class RateLimiterPlugin(BasePlugin):
             stats["queued_mentions"].clear()
             stats["cooldown_until"] = None
             stats["wakeups"].clear()  # 恢复时清空唤醒计数，避免立即再次触发
+            logger.info(f"[RateLimiter] Cooldown recovered for {session_id}, injected {dropped} dropped / {queued} queued notice")
 
-        # 冷却期内不记录唤醒（请求实际不会产生有效 LLM 调用）
+        # Cooldown active: block LLM request and send cooldown reply if mentioned
         if stats["cooldown_until"] and now < stats["cooldown_until"]:
+            stats["dropped_count"] += 1
+            event.stop()
+            await self._clear_session_buffer(session_id)
+            if self.cooldown_reply_enabled:
+                any_mentioned = any(getattr(m, "is_mentioned", False) for m in event.messages)
+                if any_mentioned:
+                    try:
+                        chain = MessageChain([Text(self.cooldown_reply_text)])
+                        await self.ctx.message_processor.send_message_chain(session_id, chain)
+                        logger.debug(f"[RateLimiter] Cooldown reply sent to {session_id} (via llm_request)")
+                    except Exception as e:
+                        logger.error(f"[RateLimiter] Failed to send cooldown reply to {session_id}: {e}")
             return
 
         # 记录唤醒时间戳
@@ -159,6 +196,10 @@ class RateLimiterPlugin(BasePlugin):
             stats["cooldown_until"] = now + self.cooldown_seconds
             stats["dropped_count"] = 0
             stats["wakeups"].clear()
+            await self._clear_session_buffer(session_id)
+            event.stop()
+            logger.warning(f"[RateLimiter] Wakeup rate exceeded in {session_id}, entering cooldown for {self.cooldown_seconds}s, LLM request stopped")
+            return
 
     # ----------------------------------------------------------------
     # 辅助方法
@@ -170,3 +211,12 @@ class RateLimiterPlugin(BasePlugin):
             stats["timestamps"].popleft()
         while stats["wakeups"] and now - stats["wakeups"][0] > 60:
             stats["wakeups"].popleft()
+
+    async def _clear_session_buffer(self, session_id: str):
+        """清空会话缓冲区，防止 debounce 循环刷新旧消息"""
+        try:
+            buffer = self.ctx.message_processor.session_buffer.get_buffer(session_id)
+            buffer.flush()
+        except Exception:
+            pass
+
